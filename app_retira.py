@@ -1,3 +1,4 @@
+
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
@@ -83,17 +84,27 @@ def conectar_planilha_retira():
     return aba_conf, aba_baixas
 
 def processar_csv_jacsys(arquivo_csv):
-    df = pd.read_csv(arquivo_csv, sep=";", encoding="latin1", dtype=str)
-    df = df.dropna(subset=["Requisição"]).copy()
-    df["Requisição"] = df["Requisição"].str.strip()
-    df = df[df["Requisição"].str.isdigit()]
+    try:
+        df = pd.read_csv(arquivo_csv, sep=";", encoding="utf-8-sig", dtype=str)
+    except UnicodeDecodeError:
+        arquivo_csv.seek(0)
+        df = pd.read_csv(arquivo_csv, sep=";", encoding="latin1", dtype=str)
+    
+    df.columns = df.columns.str.strip()
+    
+    col_req = [c for c in df.columns if "Requisi" in c]
+    col_req_nome = col_req[0] if col_req else df.columns[0]
+    
+    df = df.dropna(subset=[col_req_nome]).copy()
+    df[col_req_nome] = df[col_req_nome].str.strip()
+    df = df[df[col_req_nome].str.isdigit()]
     
     df["Transportador"] = df["Transportador"].fillna("").str.strip()
     df = df[df["Transportador"].str.contains("RETIRA|BALCAO", case=False, na=False)]
-    df = df.drop_duplicates(subset=["Requisição"], keep="first")
+    df = df.drop_duplicates(subset=[col_req_nome], keep="first")
     
     colunas_finais = pd.DataFrame({
-        "Requisicao": df["Requisição"],
+        "Requisicao": df[col_req_nome],
         "Dt_Cadastro": df["Dt.Cadastro"].fillna("").str.strip(),
         "Cliente": df["Cliente"].fillna("").str.strip(),
         "Transportador": df["Transportador"],
