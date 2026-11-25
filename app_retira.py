@@ -83,6 +83,14 @@ def conectar_planilha_retira():
         
     return aba_conf, aba_baixas
 
+def obter_serie_coluna(df, palavras_chave, padrao=""):
+    for col in df.columns:
+        col_limpa = col.lower().replace(".", "").replace(" ", "")
+        for chave in palavras_chave:
+            if chave in col_limpa:
+                return df[col].fillna(padrao).astype(str).str.strip()
+    return pd.Series([padrao] * len(df), index=df.index)
+
 def processar_csv_jacsys(arquivo_csv):
     try:
         df = pd.read_csv(arquivo_csv, sep=";", encoding="utf-8-sig", dtype=str)
@@ -99,18 +107,19 @@ def processar_csv_jacsys(arquivo_csv):
     df[col_req_nome] = df[col_req_nome].str.strip()
     df = df[df[col_req_nome].str.isdigit()]
     
-    df["Transportador"] = df["Transportador"].fillna("").str.strip()
-    df = df[df["Transportador"].str.contains("RETIRA|BALCAO", case=False, na=False)]
+    transp = obter_serie_coluna(df, ["transportador"])
+    df["Transportador_Limpo"] = transp
+    df = df[df["Transportador_Limpo"].str.contains("RETIRA|BALCAO", case=False, na=False)]
     df = df.drop_duplicates(subset=[col_req_nome], keep="first")
     
     colunas_finais = pd.DataFrame({
         "Requisicao": df[col_req_nome],
-        "Dt_Cadastro": df["Dt.Cadastro"].fillna("").str.strip(),
-        "Cliente": df["Cliente"].fillna("").str.strip(),
-        "Transportador": df["Transportador"],
-        "Valor": df["Vlr.Total"].fillna("0,00").str.strip(),
-        "Conferente": df["Conferente"].fillna("").str.strip(),
-        "Fim_Conferencia": df["Fim Conf."].fillna("").str.strip()
+        "Dt_Cadastro": obter_serie_coluna(df, ["dtcadastro", "cadastro"]),
+        "Cliente": obter_serie_coluna(df, ["cliente"]),
+        "Transportador": df["Transportador_Limpo"],
+        "Valor": obter_serie_coluna(df, ["vlrtotal", "valor", "total"], padrao="0,00"),
+        "Conferente": obter_serie_coluna(df, ["conferente"]),
+        "Fim_Conferencia": obter_serie_coluna(df, ["fimconf"])
     })
     return colunas_finais
 
