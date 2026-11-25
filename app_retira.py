@@ -1,6 +1,3 @@
-
-
-
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
@@ -51,11 +48,13 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Conexão corrigida (idêntica ao seu app de entregas)
 @st.cache_resource
 def conectar_planilha_retira():
-    base_url = "https://googleapis.com" + "/auth/"
-    escopos = [base_url + "spreadsheets", base_url + "drive"]
+    base_url = "https://www." + "googleapis.com" + "/auth/"
+    escopos = [
+        base_url + "spreadsheets",
+        base_url + "drive"
+    ]
     credenciais_dict = dict(st.secrets["connections"]["gsheets"])
     creds = Credentials.from_service_account_info(credenciais_dict, scopes=escopos)
     cliente = gspread.authorize(creds)
@@ -117,7 +116,7 @@ try:
     dados_baixas = aba_baixas.get_all_records()
 except Exception as e:
     st.cache_resource.clear()
-    st.error(f"Conexão interrompida pela rede. Clique no botão abaixo para reconectar. Detalhe: {e}")
+    st.error(f"Conexão interrompida. Clique no botão abaixo para reconectar. Detalhe: {e}")
     if st.button("🔄 Reconectar ao Google Sheets"):
         st.rerun()
     st.stop()
@@ -141,7 +140,7 @@ tab_painel, tab_baixa, tab_historico = st.tabs([
 ])
 
 with tab_painel:
-    col_m1, col_m2, col_b = st.columns([2, 2, 1])
+    col_m1, col_m2, col_b = st.columns(3)
     with col_m1:
         st.metric("📦 Pedidos Prontos Aguardando Cliente", len(df_pendentes))
     with col_m2:
@@ -249,4 +248,3 @@ if senha_digitada == senha_correta:
                         st.rerun()
             except Exception as erro:
                 st.sidebar.error(f"Erro ao processar CSV: {erro}")
-                
