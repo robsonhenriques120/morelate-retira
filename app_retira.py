@@ -64,10 +64,10 @@ def conectar_planilha_retira():
     abas_existentes = [aba.title for aba in planilha.worksheets()]
     
     if "Retira_Conferidos" not in abas_existentes:
-        aba_conf = planilha.add_worksheet(title="Retira_Conferidos", rows="2000", cols="10")
+        aba_conf = planilha.add_worksheet(title="Retira_Conferidos", rows="2000", cols="12")
         aba_conf.append_row([
-            "Requisicao", "Dt_Cadastro", "Cliente", "Transportador", 
-            "Valor", "Conferente", "Fim_Conferencia", "Data_Importacao"
+            "Requisicao", "Numero_NF", "Dt_Cadastro", "Cliente", "Transportador", 
+            "Separador", "Conferente", "Fim_Conferencia", "Data_Importacao"
         ])
     else:
         aba_conf = planilha.worksheet("Retira_Conferidos")
@@ -85,7 +85,7 @@ def conectar_planilha_retira():
 
 def obter_serie_coluna(df, palavras_chave, padrao=""):
     for col in df.columns:
-        col_limpa = col.lower().replace(".", "").replace(" ", "")
+        col_limpa = col.lower().replace(".", "").replace(" ", "").replace("º", "").replace("°", "")
         for chave in palavras_chave:
             if chave in col_limpa:
                 return df[col].fillna(padrao).astype(str).str.strip()
@@ -112,14 +112,22 @@ def processar_csv_jacsys(arquivo_csv):
     df = df[df["Transportador_Limpo"].str.contains("RETIRA|BALCAO", case=False, na=False)]
     df = df.drop_duplicates(subset=[col_req_nome], keep="first")
     
+    # Busca a coluna de Nota Fiscal (NF / Nota) se existir no CSV
+    nf_serie = obter_serie_coluna(df, ["notafiscal", "numnf", "nnf", "nota", "nf"], padrao="-")
+    nf_serie = nf_serie.replace("", "-")
+    
+    # Garante que a data/hora da conferência seja salva como texto puro no Google Sheets (preservando HH:MM)
+    fim_conf_serie = obter_serie_coluna(df, ["fimconf"], padrao="-")
+    
     colunas_finais = pd.DataFrame({
         "Requisicao": df[col_req_nome],
+        "Numero_NF": nf_serie,
         "Dt_Cadastro": obter_serie_coluna(df, ["dtcadastro", "cadastro"]),
         "Cliente": obter_serie_coluna(df, ["cliente"]),
         "Transportador": df["Transportador_Limpo"],
-        "Valor": obter_serie_coluna(df, ["vlrtotal", "valor", "total"], padrao="0,00"),
-        "Conferente": obter_serie_coluna(df, ["conferente"]),
-        "Fim_Conferencia": obter_serie_coluna(df, ["fimconf"])
+        "Separador": obter_serie_coluna(df, ["separador"], padrao="-"),
+        "Conferente": obter_serie_coluna(df, ["conferente"], padrao="-"),
+        "Fim_Conferencia": fim_conf_serie
     })
     return colunas_finais
 
@@ -146,6 +154,14 @@ df_baixas = pd.DataFrame(dados_baixas)
 
 if not df_conf.empty:
     df_conf["Requisicao"] = df_conf["Requisicao"].astype(str).str.strip()
+    
+    # Garante compatibilidade com registros antigos que ainda não tinham Numero_NF ou Separador
+    for col_nova in ["Numero_NF", "Separador", "Conferente", "Fim_Conferencia", "Dt_Cadastro", "Cliente", "Transportador"]:
+        if col_nova not in df_conf.columns:
+            df_conf[col_nova] = "-"
+        else:
+            df_conf[col_nova] = df_conf[col_nova].astype(str).replace("", "-")
+            
     reqs_baixadas = set()
     if not df_baixas.empty:
         reqs_baixadas = set(df_baixas["Requisicao"].astype(str).str.strip())
@@ -170,15 +186,31 @@ with tab_painel:
             st.rerun()
 
     if not df_pendentes.empty:
-        busca = st.text_input("🔍 Buscar por Número da Requisição ou Nome do Cliente:")
+        busca = st.text_input("🔍 Buscar por Requisição, Nº NF ou Nome do Cliente:")
         df_exibir = df_pendentes.copy()
         if busca:
             df_exibir = df_exibir[
                 df_exibir["Requisicao"].str.contains(busca, case=False, na=False) |
+                df_exibir["Numero_NF"].str.contains(busca, case=False, na=False) |
                 df_exibir["Cliente"].str.contains(busca, case=False, na=False)
             ]
+        
+        # Renomeia colunas apenas para exibição limpa na tela do balcão (sem o Valor)
+        tabela_balcao = df_exibir[[
+            "Requisicao", "Numero_NF", "Dt_Cadastro", "Cliente", 
+            "Separador", "Conferente", "Fim_Conferencia"
+        ]].rename(columns={
+            "Requisicao": "Requisição",
+            "Numero_NF": "Nº NF",
+            "Dt_Cadastro": "Data Pedido",
+            "Cliente": "Cliente",
+            "Separador": "Separador",
+            "Conferente": "Conferente",
+            "Fim_Conferencia": "Horário Conferência"
+        })
+        
         st.dataframe(
-            df_exibir[["Requisicao", "Dt_Cadastro", "Cliente", "Transportador", "Conferente", "Fim_Conferencia", "Valor"]],
+            tabela_balcao,
             use_container_width=True,
             hide_index=True
         )
@@ -191,7 +223,7 @@ with tab_baixa:
 
     if not df_pendentes.empty:
         opcoes_req = ["Selecione o pedido..."] + [
-            f"{row['Requisicao']} - {row['Cliente']}" for _, row in df_pendentes.iterrows()
+            f"{row['Requisicao']} (NF: {row['Numero_NF']}) - {row['Cliente']}" for _, row in df_pendentes.iterrows()
         ]
         escolha = st.selectbox("📋 Selecione a Requisição Pronta:", opcoes_req)
         req_manual = ""
@@ -205,9 +237,8 @@ with tab_baixa:
 
     if st.button("✅ Confirmar Entrega ao Cliente", use_container_width=True, disabled=st.session_state.enviando_retira):
         if escolha != "Selecione o pedido...":
-            partes = escolha.split(" - ", 1)
-            req_final = partes[0].strip()
-            cliente_final = partes[1].strip() if len(partes) > 1 else ""
+            req_final = escolha.split(" (NF:")[0].strip()
+            cliente_final = escolha.split(" - ", 1)[1].strip() if " - " in escolha else ""
         else:
             req_final = req_manual.strip()
             cliente_final = "Informado Manualmente"
@@ -262,9 +293,24 @@ if senha_digitada == senha_correta:
                     else:
                         agora = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y %H:%M:%S")
                         df_para_inserir["Data_Importacao"] = agora
-                        linhas = df_para_inserir.values.tolist()
-                        aba_conf.append_rows(linhas, value_input_option="USER_ENTERED")
-                        st.sidebar.success(f"✅ {len(linhas)} novos pedidos do Retira adicionados!")
+                        
+                        # Garante que o cabeçalho da planilha tenha as colunas novas se for uma planilha da v1
+                        cabecalho_atual = aba_conf.row_values(1)
+                        if "Numero_NF" not in cabecalho_atual:
+                            aba_conf.clear()
+                            aba_conf.append_row([
+                                "Requisicao", "Numero_NF", "Dt_Cadastro", "Cliente", "Transportador", 
+                                "Separador", "Conferente", "Fim_Conferencia", "Data_Importacao"
+                            ])
+                            # Re-insere todos os registros do CSV já com as colunas novas
+                            df_novo["Data_Importacao"] = agora
+                            linhas = df_novo.values.tolist()
+                        else:
+                            linhas = df_para_inserir.values.tolist()
+                            
+                        # Usa RAW para o Google Sheets não esconder as horas das datas!
+                        aba_conf.append_rows(linhas, value_input_option="RAW")
+                        st.sidebar.success(f"✅ {len(linhas)} pedidos do Retira atualizados com sucesso!")
                         st.rerun()
             except Exception as erro:
                 st.sidebar.error(f"Erro ao processar CSV: {erro}")
