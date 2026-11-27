@@ -5,6 +5,7 @@ from google.oauth2.service_account import Credentials
 import pandas as pd
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import os
 
 st.set_page_config(
     page_title="Morelate - Controle de Retira",
@@ -12,6 +13,7 @@ st.set_page_config(
     layout="wide"
 )
 
+# Identidade Visual Morelate (Mesma paleta do app de entregas)
 st.markdown("""
     <style>
     .header-card {
@@ -46,184 +48,166 @@ st.markdown("""
         background-color: #085224;
         color: white;
     }
+    div[role="radiogroup"] label {
+        font-size: 16px !important;
+        padding: 4px 0px;
+    }
     </style>
 """, unsafe_allow_html=True)
 
+# Conexão com a mesma planilha da Morelate usando abas dedicadas ao Retira
 @st.cache_resource
 def conectar_planilha_retira():
-    base_url = "https://www." + "googleapis.com" + "/auth/"
-    escopos = [
-        base_url + "spreadsheets",
-        base_url + "drive"
-    ]
+    base_url = "https://www.googleapis.com" + "/auth/"
+    escopos = [base_url + "spreadsheets", base_url + "drive"]
     credenciais_dict = dict(st.secrets["connections"]["gsheets"])
     creds = Credentials.from_service_account_info(credenciais_dict, scopes=escopos)
     cliente = gspread.authorize(creds)
     
     planilha = cliente.open_by_key("1I3V8UxkeQyP1tO7TZIVbQk7HQrxv-FSsz5l3ChCMsV4")
+    
     abas_existentes = [aba.title for aba in planilha.worksheets()]
     
     if "Retira_Conferidos" not in abas_existentes:
-        aba_conf = planilha.add_worksheet(title="Retira_Conferidos", rows="2000", cols="12")
+        aba_conf = planilha.add_worksheet(title="Retira_Conferidos", rows="2000", cols="10")
         aba_conf.append_row([
-            "Requisicao", "Numero_NF", "Dt_Cadastro", "Cliente", "Transportador", 
-            "Separador", "Conferente", "Fim_Conferencia", "Data_Importacao"
+            "Requisicao", "Dt_Cadastro", "Cliente", "Transportador", 
+            "Valor", "Conferente", "Fim_Conferencia", "Data_Importacao"
         ])
     else:
         aba_conf = planilha.worksheet("Retira_Conferidos")
         
     if "Retira_Baixas" not in abas_existentes:
-        aba_baixas = planilha.add_worksheet(title="Retira_Baixas", rows="2000", cols="6")
+        aba_baixas = planilha.add_worksheet(title="Retira_Baixas", rows="2000", cols="8")
         aba_baixas.append_row([
             "Data_Hora_Retirada", "Requisicao", "Cliente", 
-            "Retirado_Por", "Conferente_Balcao", "Observacao"
+            "Retirado_Por", "Conferente_Balcao", "Observacao",
+            "Status", "Motivo_Cancelamento"
         ])
     else:
         aba_baixas = planilha.worksheet("Retira_Baixas")
         
     return aba_conf, aba_baixas
 
-def obter_serie_coluna(df, palavras_chave, padrao=""):
-    for col in df.columns:
-        col_limpa = col.lower().replace(".", "").replace(" ", "").replace("º", "").replace("°", "")
-        for chave in palavras_chave:
-            if chave in col_limpa:
-                return df[col].fillna(padrao).astype(str).str.strip()
-    return pd.Series([padrao] * len(df), index=df.index)
-
+# Função de limpeza blindada do CSV do Jacsys (cns_251_01)
 def processar_csv_jacsys(arquivo_csv):
-    try:
-        df = pd.read_csv(arquivo_csv, sep=";", encoding="utf-8-sig", dtype=str)
-    except UnicodeDecodeError:
-        arquivo_csv.seek(0)
-        df = pd.read_csv(arquivo_csv, sep=";", encoding="latin1", dtype=str)
+    df = pd.read_csv(arquivo_csv, sep=";", encoding="latin1", dtype=str)
     
-    df.columns = df.columns.str.strip()
+    # 1. Remove linha de totalização e linhas sem Requisição
+    df = df.dropna(subset=["Requisição"]).copy()
+    df["Requisição"] = df["Requisição"].str.strip()
+    df = df[df["Requisição"].str.isdigit()]
     
-    col_req = [c for c in df.columns if "Requisi" in c]
-    col_req_nome = col_req[0] if col_req else df.columns[0]
+    # 2. Filtra apenas modalidades RETIRA e BALCAO
+    df["Transportador"] = df["Transportador"].fillna("").str.strip()
+    df = df[df["Transportador"].str.contains("RETIRA|BALCAO", case=False, na=False)]
     
-    df = df.dropna(subset=[col_req_nome]).copy()
-    df[col_req_nome] = df[col_req_nome].str.strip()
-    df = df[df[col_req_nome].str.isdigit()]
+    # 3. Remove duplicidades geradas por múltiplos separadores/pisos
+    df = df.drop_duplicates(subset=["Requisição"], keep="first")
     
-    transp = obter_serie_coluna(df, ["transportador"])
-    df["Transportador_Limpo"] = transp
-    df = df[df["Transportador_Limpo"].str.contains("RETIRA|BALCAO", case=False, na=False)]
-    df = df.drop_duplicates(subset=[col_req_nome], keep="first")
-    
-    # Busca a coluna de Nota Fiscal (NF / Nota) se existir no CSV
-    nf_serie = obter_serie_coluna(df, ["notafiscal", "numnf", "nnf", "nota", "nf"], padrao="-")
-    nf_serie = nf_serie.replace("", "-")
-    
-    # Garante que a data/hora da conferência seja salva como texto puro no Google Sheets (preservando HH:MM)
-    fim_conf_serie = obter_serie_coluna(df, ["fimconf"], padrao="-")
-    
+    # 4. Seleciona e organiza as colunas limpas
     colunas_finais = pd.DataFrame({
-        "Requisicao": df[col_req_nome],
-        "Numero_NF": nf_serie,
-        "Dt_Cadastro": obter_serie_coluna(df, ["dtcadastro", "cadastro"]),
-        "Cliente": obter_serie_coluna(df, ["cliente"]),
-        "Transportador": df["Transportador_Limpo"],
-        "Separador": obter_serie_coluna(df, ["separador"], padrao="-"),
-        "Conferente": obter_serie_coluna(df, ["conferente"], padrao="-"),
-        "Fim_Conferencia": fim_conf_serie
+        "Requisicao": df["Requisição"],
+        "Dt_Cadastro": df["Dt.Cadastro"].fillna("").str.strip(),
+        "Cliente": df["Cliente"].fillna("").str.strip(),
+        "Transportador": df["Transportador"],
+        "Valor": df["Vlr.Total"].fillna("0,00").str.strip(),
+        "Conferente": df["Conferente"].fillna("").str.strip(),
+        "Fim_Conferencia": df["Fim Conf."].fillna("").str.strip()
     })
     return colunas_finais
 
+# Logo opcional
+if os.path.exists("logo.png"):
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.image("logo.png", use_container_width=True)
+
+# Cabeçalho
 st.markdown("""
     <div class="header-card">
         <p class="header-title">🏪 Controle de Retira & Balcão</p>
-        <p class="header-subtitle">Painel de Pedidos Prontos e Comprovante de Retirada</p>
+        <p class="header-subtitle">Painel de Pedidos Prontos, Baixas e Ocorrências</p>
     </div>
 """, unsafe_allow_html=True)
 
-try:
-    aba_conf, aba_baixas = conectar_planilha_retira()
-    dados_conf = aba_conf.get_all_records()
-    dados_baixas = aba_baixas.get_all_records()
-except Exception as e:
-    st.cache_resource.clear()
-    st.error(f"Conexão interrompida. Clique no botão abaixo para reconectar. Detalhe: {e}")
-    if st.button("🔄 Reconectar ao Google Sheets"):
-        st.rerun()
-    st.stop()
+aba_conf, aba_baixas = conectar_planilha_retira()
+
+# Carrega dados atuais das duas abas
+dados_conf = aba_conf.get_all_records()
+dados_baixas = aba_baixas.get_all_records()
 
 df_conf = pd.DataFrame(dados_conf)
 df_baixas = pd.DataFrame(dados_baixas)
 
+# Filtra o que está PRONTO mas ainda NÃO FOI BAIXADO (nem entregue, nem cancelado)
 if not df_conf.empty:
     df_conf["Requisicao"] = df_conf["Requisicao"].astype(str).str.strip()
-    
-    # Garante compatibilidade com registros antigos que ainda não tinham Numero_NF ou Separador
-    for col_nova in ["Numero_NF", "Separador", "Conferente", "Fim_Conferencia", "Dt_Cadastro", "Cliente", "Transportador"]:
-        if col_nova not in df_conf.columns:
-            df_conf[col_nova] = "-"
-        else:
-            df_conf[col_nova] = df_conf[col_nova].astype(str).replace("", "-")
-            
     reqs_baixadas = set()
     if not df_baixas.empty:
         reqs_baixadas = set(df_baixas["Requisicao"].astype(str).str.strip())
+    
     df_pendentes = df_conf[~df_conf["Requisicao"].isin(reqs_baixadas)].copy()
 else:
     df_pendentes = pd.DataFrame()
 
+# Abas principais da operação
 tab_painel, tab_baixa, tab_historico = st.tabs([
     "🟢 Prontos para Retirar", 
-    "✅ Registrar Retirada (Balcão)", 
-    "📋 Histórico de Retiradas"
+    "✅ Registrar Retirada / Ocorrência", 
+    "📋 Histórico de Movimentações"
 ])
 
+# --- ABA 1: PAINEL DO BALCÃO ---
 with tab_painel:
-    col_m1, col_m2, col_b = st.columns(3)
+    col_m1, col_m2, col_m3, col_b = st.columns([2, 2, 2, 1])
     with col_m1:
-        st.metric("📦 Pedidos Prontos Aguardando Cliente", len(df_pendentes))
+        st.metric("📦 Aguardando Cliente", len(df_pendentes))
+    
+    # Calcula métricas separadas se a coluna Status já existir nos registros
+    qtd_entregues = 0
+    qtd_cancelados = 0
+    if not df_baixas.empty:
+        if "Status" in df_baixas.columns:
+            qtd_cancelados = df_baixas["Status"].astype(str).str.contains("Cancelado", case=False, na=False).sum()
+            qtd_entregues = len(df_baixas) - qtd_cancelados
+        else:
+            qtd_entregues = len(df_baixas)
+
     with col_m2:
-        st.metric("✅ Retiradas Concluídas", len(df_baixas))
+        st.metric("✅ Retiradas OK", qtd_entregues)
+    with col_m3:
+        st.metric("🔴 NF Cancelada / Recusa", qtd_cancelados)
     with col_b:
-        if st.button("🔄 Atualizar Tela"):
+        if st.button("🔄 Atualizar"):
             st.rerun()
 
     if not df_pendentes.empty:
-        busca = st.text_input("🔍 Buscar por Requisição, Nº NF ou Nome do Cliente:")
+        busca = st.text_input("🔍 Buscar por Número da Requisição ou Nome do Cliente:")
         df_exibir = df_pendentes.copy()
         if busca:
             df_exibir = df_exibir[
                 df_exibir["Requisicao"].str.contains(busca, case=False, na=False) |
-                df_exibir["Numero_NF"].str.contains(busca, case=False, na=False) |
                 df_exibir["Cliente"].str.contains(busca, case=False, na=False)
             ]
-        
-        # Renomeia colunas apenas para exibição limpa na tela do balcão (sem o Valor)
-        tabela_balcao = df_exibir[[
-            "Requisicao", "Numero_NF", "Dt_Cadastro", "Cliente", 
-            "Separador", "Conferente", "Fim_Conferencia"
-        ]].rename(columns={
-            "Requisicao": "Requisição",
-            "Numero_NF": "Nº NF",
-            "Dt_Cadastro": "Data Pedido",
-            "Cliente": "Cliente",
-            "Separador": "Separador",
-            "Conferente": "Conferente",
-            "Fim_Conferencia": "Horário Conferência"
-        })
-        
+        # Exibe apenas colunas operacionais (sem Valor)
+        cols_mostrar = [c for c in ["Requisicao", "Dt_Cadastro", "Cliente", "Transportador", "Conferente", "Fim_Conferencia"] if c in df_exibir.columns]
         st.dataframe(
-            tabela_balcao,
+            df_exibir[cols_mostrar],
             use_container_width=True,
             hide_index=True
         )
     else:
         st.info("Nenhum pedido conferido aguardando retirada no momento. Suba o CSV do Jacsys na barra lateral para atualizar.")
 
+# --- ABA 2: BAIXA NO BALCÃO (OK OU CANCELAMENTO/RECUSA) ---
 with tab_baixa:
     if "enviando_retira" not in st.session_state:
         st.session_state.enviando_retira = False
 
     if not df_pendentes.empty:
         opcoes_req = ["Selecione o pedido..."] + [
-            f"{row['Requisicao']} (NF: {row['Numero_NF']}) - {row['Cliente']}" for _, row in df_pendentes.iterrows()
+            f"{row['Requisicao']} - {row['Cliente']}" for _, row in df_pendentes.iterrows()
         ]
         escolha = st.selectbox("📋 Selecione a Requisição Pronta:", opcoes_req)
         req_manual = ""
@@ -231,86 +215,54 @@ with tab_baixa:
         escolha = "Selecione o pedido..."
         req_manual = st.text_input("📋 Digite o Número da Requisição:")
 
-    retirado_por = st.text_input("👤 Nome / CPF / Placa de quem retirou:", placeholder="Ex: João Silva - CPF 123.456... ou Placa ABC-1234")
-    conferente_balcao = st.text_input("🏷️ Conferente que entregou no balcão:", placeholder="Seu nome")
-    obs_retira = st.text_area("📝 Observações (opcional):")
+    # Seletor de Status (Padrão do App de Entregas)
+    status_balcao = st.radio(
+        "📌 Situação no Balcão:",
+        ["🟢 Pedido Entregue OK", "🔴 Cancelado / Recusado (NF Cancelada)"],
+        horizontal=True
+    )
 
-    if st.button("✅ Confirmar Entrega ao Cliente", use_container_width=True, disabled=st.session_state.enviando_retira):
+    retirado_por = ""
+    motivo_selecionado = "N/A"
+
+    if status_balcao == "🟢 Pedido Entregue OK":
+        retirado_por = st.text_input(
+            "👤 Nome / CPF / Placa de quem retirou:", 
+            placeholder="Ex: João Silva - CPF 123.456... ou Placa ABC-1234"
+        )
+    else:
+        motivo_selecionado = st.selectbox(
+            "⚠️ Motivo do Cancelamento / Recusa:",
+            [
+                "Selecione...",
+                "Nota Fiscal Cancelada no Jacsys",
+                "Erro na nota / Boleto / Preço divergente",
+                "Pedido Duplicado / Cliente não pediu",
+                "Mercadoria errada / Faltando / Avariada",
+                "Demora na separação / Cliente não quis esperar",
+                "Cliente desistiu da compra / Sem limite"
+            ]
+        )
+        retirado_por = "N/A (Cancelado/Recusado)"
+
+    conferente_balcao = st.text_input("🏷️ Conferente / Atendente do Balcão:", placeholder="Seu nome")
+    obs_retira = st.text_area("📝 Observações (opcional):", placeholder="Ex: Número da NF cancelada, detalhe da ocorrência...")
+
+    st.write("")
+
+    if st.button("✅ Confirmar Registro no Balcão", use_container_width=True, disabled=st.session_state.enviando_retira):
         if escolha != "Selecione o pedido...":
-            req_final = escolha.split(" (NF:")[0].strip()
-            cliente_final = escolha.split(" - ", 1)[1].strip() if " - " in escolha else ""
+            req_final = escolha.split(" - ")[0].strip()
+            cliente_final = escolha.split(" - ", 1)[1].strip()
         else:
             req_final = req_manual.strip()
             cliente_final = "Informado Manualmente"
 
-        if not req_final or not retirado_por.strip() or not conferente_balcao.strip():
-            st.error("❌ Preencha a Requisição, quem retirou e o nome do conferente.")
-        else:
-            st.session_state.enviando_retira = True
-            try:
-                with st.spinner("Registrando retirada..."):
-                    reqs_ja_baixadas = [str(r).strip() for r in aba_baixas.col_values(2)[1:]]
-                    if req_final in reqs_ja_baixadas:
-                        st.warning(f"⚠️ A Requisição {req_final} já foi baixada anteriormente!")
-                    else:
-                        agora = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y %H:%M:%S")
-                        aba_baixas.append_row([
-                            agora, req_final, cliente_final, 
-                            retirado_por.strip().upper(), 
-                            conferente_balcao.strip().upper(), 
-                            obs_retira.strip()
-                        ], value_input_option="USER_ENTERED")
-                        st.success(f"✅ Requisição {req_final} entregue e registrada às {agora}!")
-            except Exception as e:
-                st.error(f"❌ Erro ao salvar: {e}")
-            finally:
-                st.session_state.enviando_retira = False
-
-with tab_historico:
-    if not df_baixas.empty:
-        st.dataframe(df_baixas.iloc[::-1], use_container_width=True, hide_index=True)
-    else:
-        st.info("Nenhuma retirada registrada ainda.")
-
-st.sidebar.header("⚙️ Atualização Jacsys (Retira)")
-senha_digitada = st.sidebar.text_input("Senha da equipe:", type="password")
-senha_correta = st.secrets.get("SENHA_LOGISTICA", "morelate2026")
-
-if senha_digitada == senha_correta:
-    st.sidebar.success("Acesso liberado!")
-    arquivo_up = st.sidebar.file_uploader("Subir arquivo cns_251_01 (.csv)", type=["csv"])
-    
-    if arquivo_up is not None:
-        if st.sidebar.button("📤 Processar e Atualizar Fila"):
-            try:
-                with st.spinner("Limpando dados e sincronizando com Google Sheets..."):
-                    df_novo = processar_csv_jacsys(arquivo_up)
-                    reqs_existentes = set(str(r).strip() for r in aba_conf.col_values(1)[1:])
-                    df_para_inserir = df_novo[~df_novo["Requisicao"].isin(reqs_existentes)].copy()
-                    
-                    if df_para_inserir.empty:
-                        st.sidebar.info("Nenhum pedido novo de Retira encontrado neste arquivo.")
-                    else:
-                        agora = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y %H:%M:%S")
-                        df_para_inserir["Data_Importacao"] = agora
-                        
-                        # Garante que o cabeçalho da planilha tenha as colunas novas se for uma planilha da v1
-                        cabecalho_atual = aba_conf.row_values(1)
-                        if "Numero_NF" not in cabecalho_atual:
-                            aba_conf.clear()
-                            aba_conf.append_row([
-                                "Requisicao", "Numero_NF", "Dt_Cadastro", "Cliente", "Transportador", 
-                                "Separador", "Conferente", "Fim_Conferencia", "Data_Importacao"
-                            ])
-                            # Re-insere todos os registros do CSV já com as colunas novas
-                            df_novo["Data_Importacao"] = agora
-                            linhas = df_novo.values.tolist()
-                        else:
-                            linhas = df_para_inserir.values.tolist()
-                            
-                        # Usa RAW para o Google Sheets não esconder as horas das datas!
-                        aba_conf.append_rows(linhas, value_input_option="RAW")
-                        st.sidebar.success(f"✅ {len(linhas)} pedidos do Retira atualizados com sucesso!")
-                        st.rerun()
-            except Exception as erro:
-                st.sidebar.error(f"Erro ao processar CSV: {erro}")
+        # Validações específicas por tipo de ocorrência
+        erro_validacao = None
+        if not req_final:
+            erro_validacao = "❌ Selecione ou digite o número da Requisição."
+        elif not conferente_balcao.strip():
+            erro_validacao = "❌ Informe o nome do Conferente / Atendente do Balcão."
+        elif status_balcao == "🟢 Pedido Entregue OK" and not retirado_por.strip():
+            erro_validacao = "❌ Informe o Nome, CPF ou Placa de quem retirou o pedido."
